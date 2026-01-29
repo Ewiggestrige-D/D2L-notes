@@ -1,0 +1,8 @@
+pyproject.toml
+setup.py
+myd2l/__init__.py
+myd2l/myd2l.py
+myd2l.egg-info/PKG-INFO
+myd2l.egg-info/SOURCES.txt
+myd2l.egg-info/dependency_links.txt
+myd2l.egg-info/top_level.txt

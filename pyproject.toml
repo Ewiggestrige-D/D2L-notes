@@ -1,0 +1,6 @@
+# /home/d2l/d2l/pyproject.toml
+# 用于本地导入myd2l package
+
+[build-system]
+requires = ["setuptools>=64.0", "wheel"]
+build-backend = "setuptools.build_meta"

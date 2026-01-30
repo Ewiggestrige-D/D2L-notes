@@ -109,3 +109,93 @@ def plot(X, Y=None, xlabel=None, ylabel=None, legend=None, xlim=None,
         else:
             axes.plot(y, fmt)
     set_axes(axes, xlabel, ylabel, xlim, ylim, xscale, yscale, legend)
+
+
+class Timer:
+    """记录多次运行时间"""
+    def __init__(self):
+        """Defined in :numref:`subsec_linear_model`"""
+        self.times = []
+        self.start()
+
+    def start(self):
+        """启动计时器"""
+        self.tik = time.time()
+
+    def stop(self):
+        """停止计时器并将时间记录在列表中"""
+        self.times.append(time.time() - self.tik)
+        return self.times[-1]
+
+    def avg(self):
+        """返回平均时间"""
+        return sum(self.times) / len(self.times)
+
+    def sum(self):
+        """返回时间总和"""
+        return sum(self.times)
+
+    def cumsum(self):
+        """返回累计时间"""
+        return np.array(self.times).cumsum().tolist()
+
+def synthetic_data(w, b, num_examples):
+    """生成y=Xw+b+噪声 造一个“可控的数据集”
+    w: 真实权重（tensor，形状 (d,)）
+    b: 真实偏置（标量或 0-d tensor）
+    num_examples: 样本数
+
+    Defined in :numref:`sec_linear_scratch`"""
+    X = torch.normal(0, 1, (num_examples, len(w))) # 每个样本是一个 len(w) 维向量，特征服从标准正态分布
+    y = torch.matmul(X, w) + b
+    y += torch.normal(0, 0.01, y.shape)
+    return X, y.reshape((-1, 1)) 
+
+def linreg(X, w, b):
+    """线性回归模型
+
+    Defined in :numref:`sec_linear_scratch`"""
+    return torch.matmul(X, w) + b
+
+def squared_loss(y_hat, y):
+    """均方损失
+    reshape： 确保y 和 y_hat 形状一致，避免广播错误
+    Defined in :numref:`sec_linear_scratch`"""
+    return (y_hat - y.reshape(y_hat.shape)) ** 2 / 2  
+
+def sgd(params, lr, batch_size):
+    """小批量随机梯度下降
+    params: [w, b]（tensor 列表）
+    lr: 学习率
+    batch_size: 批大小
+
+    Defined in :numref:`sec_linear_scratch`"""
+    with torch.no_grad(): # 告诉 autograd：下面的操作不要建计算图
+        for param in params:
+            param -= lr * param.grad / batch_size # 累积的梯度/ 批大小 = 平均梯度
+            param.grad.zero_() #  必须有！PyTorch 默认梯度是 累积的
+
+def load_array(data_arrays, batch_size, is_train=True):
+    """构造一个PyTorch数据迭代器
+    torch.utils.data.TensorDataset ：是一个数据集包装器，用于将多个张量打包成一个数据集，要求所有张量的第一维（样本数）相同。
+                                    每次索引 dataset[i] 返回 (tensor1[i], tensor2[i], ..., tensorN[i])
+                                    常用于：(X, y) 配对，即特征和标签一起迭代
+    e.g.: 
+    X = torch.randn(100, 2)   # 100 个样本，2 个特征
+    y = torch.randn(100, 1)   # 100 个标签
+
+    dataset = TensorDataset(X, y)
+    print(dataset[0])  # 输出: (tensor([x1, x2]), tensor([y1]))
+
+    * 是 Python 的 “解包操作符”（unpacking operator） 它把一个可迭代对象（如列表、元组）展开为多个独立参数。
+
+    data_arrays = (features, labels)  # 一个包含两个张量的元组
+    # 不使用 *：
+    TensorDataset(data_arrays)        # ❌ 错误！传入的是一个元组，不是两个张量
+
+    # 使用 *：
+    TensorDataset(*data_arrays)       # ✅ 等价于 TensorDataset(features, labels)
+    
+    Defined in :numref:`sec_linear_concise`"""
+    dataset = data.TensorDataset(*data_arrays)
+    return data.DataLoader(dataset, batch_size, shuffle=is_train)

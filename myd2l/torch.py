@@ -354,7 +354,7 @@ class Animator:
     def __init__(self, xlabel=None, ylabel=None, legend=None, xlim=None,
                  ylim=None, xscale='linear', yscale='linear',
                  fmts=('-', 'm--', 'g-.', 'r:'), nrows=1, ncols=1,
-                 figsize=(16, 9)):
+                 figsize=(8, 4.5)):
         """Defined in :numref:`sec_softmax_scratch`"""
 
         # 增量地绘制多条线

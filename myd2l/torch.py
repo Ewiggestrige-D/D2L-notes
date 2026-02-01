@@ -40,6 +40,18 @@ from IPython import display
 from matplotlib import pyplot as plt
 from matplotlib_inline import backend_inline
 
+"""
+凡是：
+
+不参与前向 / 反向传播
+
+不进入训练循环 hot path
+
+只是 I/O、工具、设备选择
+
+👉 不需要本地化，直接用即可
+"""
+
 def use_svg_display():
     """使用svg格式在Jupyter中显示绘图
     让 Jupyter Notebook 中的 Matplotlib 图形以 SVG（矢量图）格式 显示，而非默认的 PNG。
@@ -392,7 +404,7 @@ def train_ch3(net, train_iter, test_iter, loss, num_epochs, updater):
     """训练模型（定义见第3章）
 
     Defined in :numref:`sec_softmax_scratch`"""
-    animator = Animator(xlabel='epoch', xlim=[1, num_epochs], ylim=[0.3, 0.9],
+    animator = Animator(xlabel='epoch', xlim=[1, num_epochs], ylim=[0.3, 1],
                         legend=['train loss', 'train acc', 'test acc'])
     for epoch in range(num_epochs):
         train_metrics = train_epoch_ch3(net, train_iter, loss, updater)
@@ -402,9 +414,9 @@ def train_ch3(net, train_iter, test_iter, loss, num_epochs, updater):
     assert train_loss < 0.5, train_loss
     assert train_acc <= 1 and train_acc > 0.7, train_acc
     assert test_acc <= 1 and test_acc > 0.7, test_acc
+    print(f'train_loss ={train_metrics[0]},\n train_accuracy ={train_metrics[1]},\n test_accuracy={test_acc}')
 
-
-from .utils import argmax, reshape
+# from .utils import argmax, reshape
 def predict_ch3(net, test_iter, n=6):
     """预测标签（定义见第3章）
     预测标签并可视化前 n 个样本（Fashion-MNIST 专用）
@@ -421,3 +433,90 @@ def predict_ch3(net, test_iter, n=6):
     titles = [true +'\n' + pred for true, pred in zip(trues, preds)]
     show_images(
         X[0:n].reshape(n, 28, 28), 1, n, titles=titles[0:n])
+
+
+def evaluate_loss(net, data_iter, loss):
+    """评估给定数据集上模型的损失
+
+    Defined in :numref:`sec_model_selection`"""
+    metric = Accumulator(2) # 损失的总和,样本数量
+    for X, y in data_iter:
+        out = net(X)
+        y = y.reshape(out.shape)
+        l = loss(out, y)
+        metric.add(torch.sum(l), l.numel())
+    return metric[0] / metric[1]
+
+DATA_HUB = dict()
+DATA_URL = 'http://d2l-data.s3-accelerate.amazonaws.com/'
+
+def download(name, cache_dir=os.path.join('..', 'data')):
+    """下载一个DATA_HUB中的文件，返回本地文件名
+
+    Defined in :numref:`sec_kaggle_house`"""
+    assert name in DATA_HUB, f"{name} 不存在于 {DATA_HUB}"
+    url, sha1_hash = DATA_HUB[name]
+    os.makedirs(cache_dir, exist_ok=True)
+    fname = os.path.join(cache_dir, url.split('/')[-1])
+    if os.path.exists(fname):
+        sha1 = hashlib.sha1()
+        with open(fname, 'rb') as f:
+            while True:
+                data = f.read(1048576)
+                if not data:
+                    break
+                sha1.update(data)
+        if sha1.hexdigest() == sha1_hash:
+            return fname  # 命中缓存
+    print(f'正在从{url}下载{fname}...')
+    r = requests.get(url, stream=True, verify=True)
+    with open(fname, 'wb') as f:
+        f.write(r.content)
+    return fname
+
+def download_extract(name, folder=None):
+    """下载并解压zip/tar文件
+
+    Defined in :numref:`sec_kaggle_house`"""
+    fname = download(name)
+    base_dir = os.path.dirname(fname)
+    data_dir, ext = os.path.splitext(fname)
+    if ext == '.zip':
+        fp = zipfile.ZipFile(fname, 'r')
+    elif ext in ('.tar', '.gz'):
+        fp = tarfile.open(fname, 'r')
+    else:
+        assert False, '只有zip/tar文件可以被解压缩'
+    fp.extractall(base_dir)
+    return os.path.join(base_dir, folder) if folder else data_dir
+
+def download_all():
+    """下载DATA_HUB中的所有文件
+
+    Defined in :numref:`sec_kaggle_house`"""
+    for name in DATA_HUB:
+        download(name)
+
+DATA_HUB['kaggle_house_train'] = (
+    DATA_URL + 'kaggle_house_pred_train.csv',
+    '585e9cc93e70b39160e7921475f9bcd7d31219ce')
+
+DATA_HUB['kaggle_house_test'] = (
+    DATA_URL + 'kaggle_house_pred_test.csv',
+    'fa19780a7b011d9b009e8bff8e99922a8ee2eb90')
+
+def try_gpu(i=0):
+    """如果存在，则返回gpu(i)，否则返回cpu()
+
+    Defined in :numref:`sec_use_gpu`"""
+    if torch.cuda.device_count() >= i + 1:
+        return torch.device(f'cuda:{i}')
+    return torch.device('cpu')
+
+def try_all_gpus():
+    """返回所有可用的GPU，如果没有GPU，则返回[cpu(),]
+
+    Defined in :numref:`sec_use_gpu`"""
+    devices = [torch.device(f'cuda:{i}')
+             for i in range(torch.cuda.device_count())]
+    return devices if devices else [torch.device('cpu')]

@@ -520,3 +520,26 @@ def try_all_gpus():
     devices = [torch.device(f'cuda:{i}')
              for i in range(torch.cuda.device_count())]
     return devices if devices else [torch.device('cpu')]
+def corr2d(X, K):
+    """
+    计算二维互相关（cross-correlation）
+
+    参数:
+        X: 输入张量，shape = (H, W)
+        K: 卷积核，shape = (h, w)
+
+    返回:
+        Y: 输出张量，shape = (H-h+1, W-w+1)
+
+    Defined in :numref:`sec_conv_layer`"""
+    h, w = K.shape
+    # 1. 创建输出张量（全 0）
+    Y = torch.zeros((X.shape[0] - h + 1, X.shape[1] - w + 1),
+                    dtype=X.dtype,
+                    device=X.device
+                    )
+    # 2. 滑动窗口计算
+    for i in range(Y.shape[0]):
+        for j in range(Y.shape[1]):
+            Y[i, j] = torch.sum((X[i: i + h, j: j + w] * K))
+    return Y

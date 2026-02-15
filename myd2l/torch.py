@@ -88,7 +88,7 @@ def set_axes(axes, xlabel, ylabel, xlim, ylim, xscale, yscale, legend):
 
 def plot(X, Y=None, xlabel=None, ylabel=None, legend=None, xlim=None,
          ylim=None, xscale='linear', yscale='linear',
-         fmts=('-', 'm--', 'g-.', 'r:'), figsize=(3.5, 2.5), axes=None):
+         fmts=('-', 'm--', 'g-.', 'r:'), figsize=(8, 4.5), axes=None):
     """绘制数据点
     x 坐标数据（可为 list、tensor、ndarray）
     y 坐标数据；若为 None，则 X 被当作 y 值，x 自动为索引
@@ -675,6 +675,11 @@ class Benchmark:
     def __exit__(self, *args):
         print(f'{self.description}: {self.timer.stop():.4f} sec')
 
+DATA_HUB['time_machine'] = (
+    DATA_URL + 'timemachine.txt',
+    '090b5e7e70c295757f55df93cb0a180b9691891a'
+    )
+
 def read_time_machine():
     """将时间机器数据集加载到文本行的列表中
 
@@ -788,10 +793,18 @@ def load_corpus_time_machine(max_tokens=-1):
 def seq_data_iter_random(corpus, batch_size, num_steps):
     """使用随机抽样生成一个小批量子序列
 
+    从一个长序列 corpus（如 [1,2,3,4,5,6,7,8,...]）中，随机抽取不重叠的子序列，每个子序列长度为 num_steps，并构造：
+    输入 X：子序列的前 num_steps 个 token（历史上下文）
+    标签 Y：子序列的后 num_steps 个 token（即 X 向右平移 1 位）
+    
     Defined in :numref:`sec_language_model`"""
+
     # 从随机偏移量开始对序列进行分区，随机范围包括num_steps-1
+    # 避免所有 batch 总是从序列的“整数倍位置”开始（如 0, L, 2L...），增加随机性。
     corpus = corpus[random.randint(0, num_steps - 1):]
     # 减去1，是因为我们需要考虑标签
+    # 每个子序列需要 num_steps 个输入 + num_steps 个标签，但标签是输入的“下一个”
+    # 总共需要 num_steps + 1 个连续 token！
     num_subseqs = (len(corpus) - 1) // num_steps
     # 长度为num_steps的子序列的起始索引
     initial_indices = list(range(0, num_subseqs * num_steps, num_steps))
@@ -809,19 +822,56 @@ def seq_data_iter_random(corpus, batch_size, num_steps):
         initial_indices_per_batch = initial_indices[i: i + batch_size]
         X = [data(j) for j in initial_indices_per_batch]
         Y = [data(j + 1) for j in initial_indices_per_batch]
+        # 将列表转为 PyTorch 张量
+        # X 和 Y 的形状均为 (batch_size, num_steps)
+        # 使用 yield 实现内存高效的迭代器
         yield torch.tensor(X), torch.tensor(Y)
 
 def seq_data_iter_sequential(corpus, batch_size, num_steps):
     """使用顺序分区生成一个小批量子序列
+    它特别适用于需要维持序列连续性的场景，比如 RNN 训练中希望跨 batch 传递隐藏状态。
 
-    Defined in :numref:`sec_language_model`"""
+    从长序列 corpus 中，按顺序、不打乱地划分出多个 batch，每个 batch 包含 batch_size 条长度为 num_steps 的子序列，并保证：
+    - 同一批内：不同样本是原始序列中等间隔的片段（用于并行）
+    - 批与批之间：在原始序列中连续衔接（可用于状态传递）
+    ✅ 这是 stateful RNN 训练的标准方式。
+    """
     # 从随机偏移量开始划分序列
+    # 随机起始偏移（避免固定对齐）
     offset = random.randint(0, num_steps)
+    # 我们需要满足两个条件：
+    # - X 和 Y 都要有足够长度 → 需要 num_tokens + 1 个原始 token（Y 比 X 多一个位置）
+    # - 总 token 数必须能被 batch_size 整除 → 以便 reshape 成 (batch_size, T)
+    # 所以：
+    # 可用长度 = len(corpus) - offset（去掉开头偏移）
+    # 但 Y 需要再往后一个位置 → 最大可用 = len(corpus) - offset - 1
+    # 然后向下取整到 batch_size 的倍数：// batch_size * batch_size
     num_tokens = ((len(corpus) - offset - 1) // batch_size) * batch_size
+
+    # 构造完整的 Xs 和 Ys（全局视图）
     Xs = torch.tensor(corpus[offset: offset + num_tokens])
     Ys = torch.tensor(corpus[offset + 1: offset + 1 + num_tokens])
+
+    # 重塑为 (batch_size, T) —— “垂直切分” 
+    # 将长序列“竖着”切成 batch_size 条平行轨道
+    """
+    Xs = [
+    [x1, x4, x7, x10],   # 轨道 0
+    [x2, x5, x8, x11],   # 轨道 1
+    [x3, x6, x9, x12]    # 轨道 2
+    ]
+    ✅ 每条轨道是原始序列中每隔 batch_size 个位置取一个 token
+    ✅ 轨道之间在时间上是交错的，但各自保持连续
+
+    为什么这样做？
+    - 允许在一个 batch 中并行处理 batch_size 个独立但连续的子序列
+    - 对于 RNN，每条轨道可以维护自己的隐藏状态
+    """
     Xs, Ys = Xs.reshape(batch_size, -1), Ys.reshape(batch_size, -1)
     num_batches = Xs.shape[1] // num_steps
+    # 逐 batch 生成（滑动窗口） 
+    # 沿时间维度滑动窗口，每次取 num_steps 列
+    # X 和 Y 形状均为 (batch_size, num_steps)
     for i in range(0, num_steps * num_batches, num_steps):
         X = Xs[:, i: i + num_steps]
         Y = Ys[:, i: i + num_steps]
@@ -832,10 +882,10 @@ class SeqDataLoader:
     def __init__(self, batch_size, num_steps, use_random_iter, max_tokens):
         """Defined in :numref:`sec_language_model`"""
         if use_random_iter:
-            self.data_iter_fn = d2l.seq_data_iter_random
+            self.data_iter_fn = seq_data_iter_random
         else:
-            self.data_iter_fn = d2l.seq_data_iter_sequential
-        self.corpus, self.vocab = d2l.load_corpus_time_machine(max_tokens)
+            self.data_iter_fn = seq_data_iter_sequential
+        self.corpus, self.vocab = load_corpus_time_machine(max_tokens)
         self.batch_size, self.num_steps = batch_size, num_steps
 
     def __iter__(self):
@@ -899,8 +949,8 @@ def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter):
     """训练网络一个迭代周期（定义见第8章）
 
     Defined in :numref:`sec_rnn_scratch`"""
-    state, timer = None, d2l.Timer()
-    metric = d2l.Accumulator(2)  # 训练损失之和,词元数量
+    state, timer = None, Timer()
+    metric = Accumulator(2)  # 训练损失之和,词元数量
     for X, Y in train_iter:
         if state is None or use_random_iter:
             # 在第一次迭代或使用随机抽样时初始化state
@@ -936,7 +986,7 @@ def train_ch8(net, train_iter, vocab, lr, num_epochs, device,
 
     Defined in :numref:`sec_rnn_scratch`"""
     loss = nn.CrossEntropyLoss()
-    animator = d2l.Animator(xlabel='epoch', ylabel='perplexity',
+    animator = Animator(xlabel='epoch', ylabel='perplexity',
                             legend=['train'], xlim=[10, num_epochs])
     # 初始化
     if isinstance(net, nn.Module):
@@ -996,5 +1046,5 @@ class RNNModel(nn.Module):
                         self.num_directions * self.rnn.num_layers,
                         batch_size, self.num_hiddens), device=device))
 
-d2l.DATA_HUB['fra-eng'] = (d2l.DATA_URL + 'fra-eng.zip',
-                           '94646ad1522d915e7b0f9296181140edcf86a4f5')
+#d2l.DATA_HUB['fra-eng'] = (d2l.DATA_URL + 'fra-eng.zip',
+#                          '94646ad1522d915e7b0f9296181140edcf86a4f5')

@@ -920,16 +920,43 @@ def predict_ch8(prefix, num_preds, net, vocab, device):
     """在prefix后面生成新字符
 
     Defined in :numref:`sec_rnn_scratch`"""
+    # 1️⃣ 初始化隐状态
     state = net.begin_state(batch_size=1, device=device)
+    # 2️⃣ 输出序列（保存 index）
+    # vocab[prefix[0]]：将第一个字符映射为索引（如 'h' → 7）
+    # outputs 存储所有已生成 token 的索引（包括 prefix 和新生成部分）
+    # ⚠️ 注意：这里只加了第一个字符！后续字符通过“预热”逐步加入
     outputs = [vocab[prefix[0]]]
-    get_input = lambda: d2l.reshape(d2l.tensor(
-        [outputs[-1]], device=device), (1, 1))
+    # 3️⃣ 输入构造函数（闭包）
+    get_input = lambda: torch.tensor(
+        [outputs[-1]], device=device
+    ).reshape(1, 1)
+    # 为什么需要预热？
+    # RNN 的隐藏状态 state 需要“看到”整个 prefix 才能合理预测后续
+    # 但 outputs 初始只有 prefix[0]，所以要逐步喂入剩余字符
+    # ✅ 关键点：预热期不使用模型预测结果，而是强制用真实 prefix 字符更新状态！
+    # 这确保隐藏状态 state 编码了完整上下文 "abc"。
     for y in prefix[1:]:  # 预热期
         _, state = net(get_input(), state)
         outputs.append(vocab[y])
+        
+    # “在接下来的 num_preds 步中，每一步都：
+    # 将上一步生成的 token 索引（通过 get_input() 获取）作为当前输入；
+    # 将上一时刻的隐藏状态传入 RNN；
+    # RNN 返回当前时间步的输出 logits y 和更新后的隐藏状态 state；
+    # 通过对 y 进行 argmax（贪婪解码），得到概率最大的下一个 token 的索引；
+    # 将该索引追加到 outputs 列表末尾。” 
+    # 关键：这一步只处理索引；最后才统一用 vocab.idx_to_token 转回字符。
     for _ in range(num_preds):  # 预测num_preds步
         y, state = net(get_input(), state)
         outputs.append(int(y.argmax(dim=1).reshape(1)))
+    # ''.join(list) 是 Python 中将字符串列表拼接成一个字符串的标准方法
+    # 引号中的内容是分隔符
+    # '' 表示无分隔符（直接拼接）
+    # ',' 会得到 'c,d,e'
+    # ' ' 会得到 'c d e'
+    # 为什么用 ''？
+    # 因为我们在做字符级语言模型，目标是生成连续文本，如 "hello"，而不是 "h e l l o"。  
     return ''.join([vocab.idx_to_token[i] for i in outputs])
 
 def grad_clipping(net, theta):
@@ -977,7 +1004,7 @@ def train_epoch_ch8(net, train_iter, loss, updater, device, use_random_iter):
             grad_clipping(net, 1)
             # 因为已经调用了mean函数
             updater(batch_size=1)
-        metric.add(l * d2l.size(y), d2l.size(y))
+        metric.add(l * y.numel(), y.numel())
     return math.exp(metric[0] / metric[1]), metric[1] / timer.stop()
 
 def train_ch8(net, train_iter, vocab, lr, num_epochs, device,
@@ -992,7 +1019,7 @@ def train_ch8(net, train_iter, vocab, lr, num_epochs, device,
     if isinstance(net, nn.Module):
         updater = torch.optim.SGD(net.parameters(), lr)
     else:
-        updater = lambda batch_size: d2l.sgd(net.params, lr, batch_size)
+        updater = lambda batch_size: sgd(net.params, lr, batch_size)
     predict = lambda prefix: predict_ch8(prefix, 50, net, vocab, device)
     # 训练和预测
     for epoch in range(num_epochs):

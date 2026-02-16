@@ -284,22 +284,22 @@ signal less
         - **ResNet 的残差函数 $F(x)$ 更温和，不会像普通网络那样让某一层主导整个变换过程**
     - **Bottom 图**：所有层的响应标准差按**降序排列**（最大在前）
       - Observation
-        -所有模型的 std 都从高到低递减
+        - 所有模型的 std 都从高到低递减
         - **plain 模型**（虚线）：前面几个层的 std 很高（>2），但很快下降
         - **ResNet 模型**（实线）：前面几个层的 std 较低（~1.5），且**下降速度更快、更平滑**
       - 含义：
-        - 在 plain 网络中，**少数几个层承担了大部分信号变化**（即“关键层”）
+        - 在 plain net中，**少数几个层承担了大部分信号变化**（即“关键层”）
         - 在 ResNet 中，**所有层的响应都较小且均匀分布**，没有明显的“主控层”
         - **ResNet 的学习是“分布式”的**，每层只做微调，而不是由少数层完成主要任务
       - 实际意义：
-        - 深度 ResNet 不依赖某几层“强力修改”信号
+        - 深度 ResNet **不依赖**某几层“强力修改”信号
         - 而是通过**大量浅层微调**逐步逼近目标
         - 类似于“渐进式学习”：每一步只做一点点调整，避免破坏已有结构
 
+- over 1000 layers
+  - no optimization difficulty
+  - 1202 layers($n=600$)
+    - params:19.4M FLOPs
+    - error rate: 7.93% 
 ### 4.3. Object Detection on PASCAL and MS COCO
-
-## Appendix A. Object Detection Baselines
-
-## Appendix B. Object Detection Improvements
-
-## Appendix C. ImageNet Localization
+- good generalization performance on other tasks

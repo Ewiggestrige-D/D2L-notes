@@ -1090,12 +1090,23 @@ def preprocess_nmt(text):
 
     Defined in :numref:`sec_machine_translation`"""
     def no_space(char, prev_char):
+        # 判断当前字符 char 是否是一个标点符号（,.!?），且前一个字符不是空格。
+        # 我们希望统一格式：在标点前加空格，以便后续按空格分词时，标点能成为独立 token
         return char in set(',.!?') and prev_char != ' '
 
-    # 使用空格替换不间断空格
-    # 使用小写字母替换大写字母
+    # \u202f：窄不间断空格（Narrow No-Break Space），常见于法语文本（如 "10 km"）
+    # \xa0：不间断空格（No-Break Space），HTML 中常用
+    # .lower()：转为小写，减少词表大小（避免 "The" 和 "the" 被视为不同词）
+    # ✅ 作用：
+    # 消除非标准空格 → 统一用普通空格 ' ' 分隔
+    # 小写化 → 提升数据一致性，缓解数据稀疏
     text = text.replace('\u202f', ' ').replace('\xa0', ' ').lower()
     # 在单词和标点符号之间插入空格
+    # 对每个字符 char（及其索引 i）：
+    # 如果 i == 0（第一个字符）→ 直接保留 char
+    # 否则，检查 no_space(char, text[i-1])：
+    # 若为 True（即 char 是标点 且 前一个字符不是空格）→ 输出 ' ' + char
+    # 否则 → 输出 char
     out = [' ' + char if i > 0 and no_space(char, text[i - 1]) else char
            for i, char in enumerate(text)]
     return ''.join(out)
@@ -1105,9 +1116,18 @@ def tokenize_nmt(text, num_examples=None):
 
     Defined in :numref:`sec_machine_translation`"""
     source, target = [], []
+    # text.split('\n')：按换行符分割成句子对
     for i, line in enumerate(text.split('\n')):
+        # num_examples：用于调试或快速实验，只取前 N 行
         if num_examples and i > num_examples:
             break
+        
+        # ✅ 假设数据格式：
+        # 每行是：英语句子\t法语句子
+        # 例如："hello world\tbonjour le monde"
+        # 💡 为什么用 \t？
+        # 制表符在自然语言中极少出现，不会与句子内容冲突
+        # 是平行语料的标准分隔符（如 WMT 数据集）
         parts = line.split('\t')
         if len(parts) == 2:
             source.append(parts[0].split(' '))
@@ -1119,6 +1139,26 @@ def show_list_len_pair_hist(legend, xlabel, ylabel, xlist, ylist):
 
     Defined in :numref:`sec_machine_translation`"""
     set_figsize()
+    """
+    背景：matplotlib.pyplot.hist() 的返回值
+    在 Matplotlib 中，plt.hist() 函数返回一个包含 3 个元素的元组：
+
+    n, bins, patches = plt.hist(data)
+
+    其中：
+    n：每个 bin 的频数（即直方图的高度），类型是 numpy.ndarray
+    bins：bin 的边界值（例如 [0, 5, 10, 15, ...]），类型是 numpy.ndarray
+    patches：表示直方图中每个柱子的 Patch 对象列表（用于后续样式修改，如颜色、填充等）
+
+    ❓ 那么 _, _, patches = ... 是什么意思？
+    这是 Python 的“丢弃变量”惯用法：
+    _（下划线）是一个合法的变量名
+    在 Python 社区中，约定俗成地用 _ 表示“我不关心这个值”
+    所以 _, _, patches 表示：
+    第一个返回值（n）→ 丢弃，不使用
+    第二个返回值（bins）→ 丢弃，不使用
+    第三个返回值（patches）→ 保留，赋值给变量 patches
+    """
     _, _, patches = plt.hist(
         [[len(l) for l in xlist], [len(l) for l in ylist]])
     plt.xlabel(xlabel)
@@ -1138,13 +1178,18 @@ def truncate_pad(line, num_steps, padding_token):
 def build_array_nmt(lines, vocab, num_steps):
     """将机器翻译的文本序列转换成小批量
 
+    负责将原始文本转换为可被模型训练使用的张量批次
+
     Defined in :numref:`subsec_mt_data_loading`"""
+    # 将词转为索引（词表映射）
     lines = [vocab[l] for l in lines]
+    # 添加 <eos>（End-of-Sequence）标记
     lines = [l + [vocab['<eos>']] for l in lines]
+    # 截断或填充到固定长度 num_steps
     array = torch.tensor([truncate_pad(
         l, num_steps, vocab['<pad>']) for l in lines])
-    valid_len = d2l.reduce_sum(
-        d2l.astype(array != vocab['<pad>'], d2l.int32), 1)
+    # 计算每个序列的有效长度（不含 padding）
+    valid_len = (array != vocab['<pad>']).type(torch.int32).sum(1)
     return array, valid_len
 
 def load_data_nmt(batch_size, num_steps, num_examples=600):

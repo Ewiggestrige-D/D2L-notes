@@ -1270,25 +1270,48 @@ def sequence_mask(X, valid_len, value=0):
     """在序列中屏蔽不相关的项
 
     Defined in :numref:`sec_seq2seq_decoder`"""
+    # 最大值是X的dim2
     maxlen = X.size(1)
+    # 首先建立长度和maxlen相同的tensor
+    # 然后通过[None, :]将tensor的格式变为(1, maxlen)，便于广播
+    # 对比这个tensor和有效长度tensor (batch_size, 1)
+    # 比较结果：mask[i, j] = (j < valid_len[i])
+    # mask[i, j] = True 表示位置 (i, j) 是有效的
     mask = torch.arange((maxlen), dtype=torch.float32,
                         device=X.device)[None, :] < valid_len[:, None]
+    # ~mask：取反，True 变 False，表示无效位置
+    # 将这些位置设为 value（默认 0）
     X[~mask] = value
     return X
 
 class MaskedSoftmaxCELoss(nn.CrossEntropyLoss):
     """带遮蔽的softmax交叉熵损失函数
+    目的：在计算交叉熵损失时，忽略 padding 位置的损失，只对有效 token 计算 loss。
+    | 张量 | 形状 | 含义 |
+    |------|------|------|
+    | `pred` | `(B, T, V)` | 模型输出的 logits（未归一化分数） |
+    | `label` | `(B, T)` | 真实标签（token IDs），padding 位置通常是 `<pad>` 的 ID |
+    | `valid_len` | `(B,)` | 每个样本的有效长度（不含 padding） |
+
 
     Defined in :numref:`sec_seq2seq_decoder`"""
     # pred的形状：(batch_size,num_steps,vocab_size)
     # label的形状：(batch_size,num_steps)
     # valid_len的形状：(batch_size,)
     def forward(self, pred, label, valid_len):
+        # 初始化一个全 1 张量，形状 (B, T)
         weights = torch.ones_like(label)
+        # 将其中padding的部分设为0
         weights = sequence_mask(weights, valid_len)
+        # nn.CrossEntropyLoss 默认会对所有元素求平均（reduction='mean'）
+        # 设为 'none' 后，返回每个位置的 loss，形状 (B, T) 这样才能手动加权
         self.reduction='none'
+        # 计算未加权的 loss
         unweighted_loss = super(MaskedSoftmaxCELoss, self).forward(
             pred.permute(0, 2, 1), label)
+        # padding 位置 loss 变为 0 （weight中的0）
+        # .mean(dim=1)：对每个序列的有效位置求平均
+        #  关键优势：每个样本的 loss 是其有效 token 的平均 loss，不受 padding 长度影响（因此不能默认设置reduction='mean'）
         weighted_loss = (unweighted_loss * weights).mean(dim=1)
         return weighted_loss
 
@@ -1300,6 +1323,12 @@ def train_seq2seq(net, data_iter, lr, num_epochs, tgt_vocab, device):
         if type(m) == nn.Linear:
             nn.init.xavier_uniform_(m.weight)
         if type(m) == nn.GRU:
+            # GRU有hidden layer，即一个层包含多个权重矩阵
+            # 输入到隐藏（input-to-hidden） 权重：weight_ih_l0
+            # 隐藏到隐藏（hidden-to-hidden） 权重：weight_hh_l0
+            # 后缀 _l0 表示第 0 层（layer 0）
+            # 这些权重不会像 nn.Linear 那样直接暴露为 .weight 属性，而是以命名参数的形式存在。
+            # m._flat_weights_names 返回一个列表，包含所有扁平化权重的名称
             for param in m._flat_weights_names:
                 if "weight" in param:
                     nn.init.xavier_uniform_(m._parameters[param])
@@ -1309,21 +1338,51 @@ def train_seq2seq(net, data_iter, lr, num_epochs, tgt_vocab, device):
     optimizer = torch.optim.Adam(net.parameters(), lr=lr)
     loss = MaskedSoftmaxCELoss()
     net.train()
-    animator = Animator(xlabel='epoch', ylabel='loss',
+    animator = d2l.Animator(xlabel='epoch', ylabel='loss',
                      xlim=[10, num_epochs])
     for epoch in range(num_epochs):
-        timer = Timer()
-        metric = Accumulator(2)  # 训练损失总和，词元数量
+        timer = d2l.Timer()
+        metric = d2l.Accumulator(2)  # 训练损失总和，词元数量
         for batch in data_iter:
-            optimizer.zero_grad()
+            optimizer.zero_grad() #梯度清零初始化
             X, X_valid_len, Y, Y_valid_len = [x.to(device) for x in batch]
+            # 从目标语言词表中获取 <bos>（begin of sentence）的 token ID
+            # 创建一个 Y.shape[0] 全为 <bos>的列表 
+            # 将形状从 (Y.shape[0],) 变为 (Y.shape[0], 1)
+            # 方便修改将每个样本都以 <bos> 开头
             bos = torch.tensor([tgt_vocab['<bos>']] * Y.shape[0],
                           device=device).reshape(-1, 1)
+            # 目的：为 batch 中每个样本创建一个起始符 <bos>，并添加时间步维度（1 步）
+            # concatenate 将bos放在第一
+            # Y[:, :-1] = 去掉最后一列
+            #  注意：这里 Y 已经包含 <bos> 作为第一个 token！
+            # 在时间步维度（第 1 维） 拼接
             dec_input = torch.cat([bos, Y[:, :-1]], 1)  # 强制教学
+            # 返回 (pred_logits, decoder_state)
+            """
+            | 参数 | 形状 | 含义 | 为什么需要？ |
+            |------|------|------|-------------|
+            | `X` | `(B, T_src)` | 源序列（输入句子） 的 token ID | Encoder 的输入 |
+            | `dec_input` | `(B, T_tgt)` | 解码器输入序列（`[<bos>, y₁, ..., y_{T-1}]`） | Decoder 的输入（Teacher Forcing） |
+            | `X_valid_len` | `(B,)` | 源序列的有效长度（不含 padding） | 用于：<br>• Encoder 处理变长序列<br>• Attention 计算（如果有的话） |
+            X 和 X_valid_len 输入encoder 计算出 context tensor 和 hidden state
+            dec_input 输入decoder 计算出 decoder embedding
+            context tensor、 hidden state、decoder embedding 一起输入decoder 计算出y_hat
+
+            """
             Y_hat, _ = net(X, dec_input, X_valid_len)
+            """
+            | 参数 | 形状 | 含义 | 为什么需要？ |
+            |------|------|------|-------------|
+            | `Y_hat` | `(B, T_tgt, V)` | 模型预测的 logits | CrossEntropyLoss 的输入 |
+            | `Y` | `(B, T_tgt)` | 真实目标序列（token ID） | 标签 |
+            | `Y_valid_len` | `(B,)` | 目标序列的有效长度 | 用于屏蔽 padding 位置的 loss |
+            """
             l = loss(Y_hat, Y, Y_valid_len)
+            # MaskedSoftmaxCELoss 返回 (batch_size,) 的 loss 向量 因此需要sum
             l.sum().backward()	# 损失函数的标量进行“反向传播”
-            grad_clipping(net, 1)
+            d2l.grad_clipping(net, 1)
+            # 当前 batch 的有效 token 总数
             num_tokens = Y_valid_len.sum()
             optimizer.step()
             with torch.no_grad():
@@ -1338,26 +1397,47 @@ def predict_seq2seq(net, src_sentence, src_vocab, tgt_vocab, num_steps,
     """序列到序列模型的预测
 
     Defined in :numref:`sec_seq2seq_training`"""
-    # 在预测时将net设置为评估模式
+    # 在预测时将net设置为评估模式 关闭 dropout，固定 batchnorm
     net.eval()
+    # 1，处理源句子
+    # 小写+分词+添加 <eos>+词表映射
     src_tokens = src_vocab[src_sentence.lower().split(' ')] + [
         src_vocab['<eos>']]
+    # 记录有效长度
     enc_valid_len = torch.tensor([len(src_tokens)], device=device)
-    src_tokens = truncate_pad(src_tokens, num_steps, src_vocab['<pad>'])
-    # 添加批量轴
+    # 截断与填充
+    src_tokens = d2l.truncate_pad(src_tokens, num_steps, src_vocab['<pad>'])
+    # 2.添加encoder批量轴
+    # 在深度学习中：
+    # 训练时：数据是 批量（batch） 处理的，输入形状通常是 (batch_size, seq_len, ...)
+    # 推理时（预测） 我们往往只处理 单个句子（batch_size = 1）
+    # 但神经网络模块（如 nn.Embedding, nn.GRU）要求输入有明确的 batch 维度。
+    # ✅ 所以，即使只有一个样本，也必须显式添加 batch 维度！
+    # src_tokens 没有 batch 维度！只是一个一维序列
+    # torch.unsqueeze(input, dim) 在指定dim 插入一个大小为 1 的新维度。
     enc_X = torch.unsqueeze(
         torch.tensor(src_tokens, dtype=torch.long, device=device), dim=0)
+    # enc_X: (1, seq_len) → batch_size=1 的源序列
+    # enc_valid_len: torch.tensor([len(src_tokens)]) → (1,)，表示这个 batch 中唯一句子的有效长度
     enc_outputs = net.encoder(enc_X, enc_valid_len)
     dec_state = net.decoder.init_state(enc_outputs, enc_valid_len)
-    # 添加批量轴
+    # 3.添加decoder批量轴
     dec_X = torch.unsqueeze(torch.tensor(
         [tgt_vocab['<bos>']], dtype=torch.long, device=device), dim=0)
     output_seq, attention_weight_seq = [], []
     for _ in range(num_steps):
         Y, dec_state = net.decoder(dec_X, dec_state)
         # 我们使用具有预测最高可能性的词元，作为解码器在下一时间步的输入
-        dec_X = Y.argmax(dim=2)
+        dec_X = Y.argmax(dim=2) # 贪心搜索
+        # 从模型输出中提取单个预测 token ID 
+        # dec_X 是解码器当前时间步的预测 token ID
+        # 因为推理时 batch_size = 1，且每次只生成一个词（num_steps=1）
+        # 所以 dec_X 的形状是 (1, 1) —— 表示 1 个样本，1 个时间步
+        # .squeeze(dim=0)移除第 0 维（batch 维度）
+        # .item()作用：将单元素张量（scalar tensor） 转为 Python 标量（普通 int/float）
+        # 前提：张量必须只包含一个元素（如 (1,) 或 ()）
         pred = dec_X.squeeze(dim=0).type(torch.int32).item()
+
         # 保存注意力权重（稍后讨论）
         if save_attention_weights:
             attention_weight_seq.append(net.decoder.attention_weights)
@@ -1374,10 +1454,14 @@ def bleu(pred_seq, label_seq, k):
     pred_tokens, label_tokens = pred_seq.split(' '), label_seq.split(' ')
     len_pred, len_label = len(pred_tokens), len(label_tokens)
     score = math.exp(min(0, 1 - len_label / len_pred))
+    # 初始化 n-gram 循环
+    # 计算 1-gram, 2-gram, ..., k-gram 的 modified precisioncc
     for n in range(1, k + 1):
+        # 统计参考译文的 n-gram 频次
         num_matches, label_subs = 0, collections.defaultdict(int)
-        for i in range(len_label - n + 1):
+        for i in range(len_label - n + 1): #range(len_label - n + 1 :为了正确枚举所有长度为 n 的连续子序列（n-grams）
             label_subs[' '.join(label_tokens[i: i + n])] += 1
+        # 匹配候选译文的 n-gram
         for i in range(len_pred - n + 1):
             if label_subs[' '.join(pred_tokens[i: i + n])] > 0:
                 num_matches += 1

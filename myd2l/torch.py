@@ -1338,11 +1338,11 @@ def train_seq2seq(net, data_iter, lr, num_epochs, tgt_vocab, device):
     optimizer = torch.optim.Adam(net.parameters(), lr=lr)
     loss = MaskedSoftmaxCELoss()
     net.train()
-    animator = d2l.Animator(xlabel='epoch', ylabel='loss',
+    animator = Animator(xlabel='epoch', ylabel='loss',
                      xlim=[10, num_epochs])
     for epoch in range(num_epochs):
-        timer = d2l.Timer()
-        metric = d2l.Accumulator(2)  # 训练损失总和，词元数量
+        timer = Timer()
+        metric = Accumulator(2)  # 训练损失总和，词元数量
         for batch in data_iter:
             optimizer.zero_grad() #梯度清零初始化
             X, X_valid_len, Y, Y_valid_len = [x.to(device) for x in batch]
@@ -1381,7 +1381,7 @@ def train_seq2seq(net, data_iter, lr, num_epochs, tgt_vocab, device):
             l = loss(Y_hat, Y, Y_valid_len)
             # MaskedSoftmaxCELoss 返回 (batch_size,) 的 loss 向量 因此需要sum
             l.sum().backward()	# 损失函数的标量进行“反向传播”
-            d2l.grad_clipping(net, 1)
+            grad_clipping(net, 1)
             # 当前 batch 的有效 token 总数
             num_tokens = Y_valid_len.sum()
             optimizer.step()
@@ -1406,7 +1406,7 @@ def predict_seq2seq(net, src_sentence, src_vocab, tgt_vocab, num_steps,
     # 记录有效长度
     enc_valid_len = torch.tensor([len(src_tokens)], device=device)
     # 截断与填充
-    src_tokens = d2l.truncate_pad(src_tokens, num_steps, src_vocab['<pad>'])
+    src_tokens = truncate_pad(src_tokens, num_steps, src_vocab['<pad>'])
     # 2.添加encoder批量轴
     # 在深度学习中：
     # 训练时：数据是 批量（batch） 处理的，输入形状通常是 (batch_size, seq_len, ...)
@@ -1468,3 +1468,274 @@ def bleu(pred_seq, label_seq, k):
                 label_subs[' '.join(pred_tokens[i: i + n])] -= 1
         score *= math.pow(num_matches / (len_pred - n + 1), math.pow(0.5, n))
     return score
+
+def show_heatmaps(matrices, xlabel, ylabel, titles=None, figsize=(4.5, 4.5),
+                  cmap='Reds'):
+    """显示矩阵热图
+
+    Defined in :numref:`sec_attention-cues`"""
+    use_svg_display()
+    num_rows, num_cols = matrices.shape[0], matrices.shape[1]
+    fig, axes = plt.subplots(
+        num_rows, 
+        num_cols, # 创建 num_rows × num_cols 个子图
+        figsize=figsize,# tuple 每个子图的大小（宽, 高）
+        sharex=True, 
+        sharey=True, # 所有子图共享 x/y 轴刻度 → 节省空间、对齐美观
+        squeeze=False) # 始终返回 2D axes 数组，即使 num_rows=1 或 num_cols=1✅ 避免后续索引出错（如 axes[i][j] 始终有效）
+    # axes: (num_rows, num_cols) → 每个元素是一个 Axes 对象
+    # matrices: (num_rows, num_cols, Q, K) → 每个元素是一个 (Q, K) 矩阵
+    # 外层 i：遍历每一行
+    # 内层 j：遍历每一列
+    # ax：当前子图的绘图区域
+    # matrix：当前要可视化的注意力权重矩阵（形状 (Q, K)）
+    for i, (row_axes, row_matrices) in enumerate(zip(axes, matrices)): # 将axes和matrices  zip 将它们按行配对；同时获取索引 i 和值 (row_axes, row_matrices)
+        for j, (ax, matrix) in enumerate(zip(row_axes, row_matrices)):# 将axes和matrices  zip 将它们按列配对
+            #将 PyTorch 张量转为 NumPy 数组（imshow 要求）
+            pcm = ax.imshow(matrix.detach().numpy(), cmap=cmap) # .detach()创建一个不追踪梯度的副本，避免影响计算图
+            if i == num_rows - 1: # x 轴标签（Keys） 只在最后一行显示
+                ax.set_xlabel(xlabel)
+            if j == 0: # y 轴标签（Queries） 只在第一列显示
+                ax.set_ylabel(ylabel)
+            if titles:#每列共享同一个标题（如不同 attention head 的名称）
+                ax.set_title(titles[j]) 
+    fig.colorbar(pcm, ax=axes, shrink=0.6);# 将 colorbar 缩小到 60% 高度，避免遮挡
+
+def masked_softmax(X, valid_lens):
+    """通过在最后一个轴上掩蔽元素来执行softmax操作
+
+    Defined in :numref:`sec_attention-scoring-functions`"""
+    # X:3D张量，valid_lens:1D或2D张量
+    if valid_lens is None:
+        return nn.functional.softmax(X, dim=-1)
+    else:
+        shape = X.shape
+        if valid_lens.dim() == 1:
+            valid_lens = torch.repeat_interleave(valid_lens, shape[1])
+        else:
+            valid_lens = valid_lens.reshape(-1)
+        # 最后一轴上被掩蔽的元素使用一个非常大的负值替换，从而其softmax输出为0
+        X = sequence_mask(X.reshape(-1, shape[-1]), valid_lens,
+                              value=-1e6)
+        return nn.functional.softmax(X.reshape(shape), dim=-1)
+
+class AdditiveAttention(nn.Module):
+    """加性注意力
+
+    Defined in :numref:`sec_attention-scoring-functions`"""
+    def __init__(self, key_size, query_size, num_hiddens, dropout, **kwargs):
+        super(AdditiveAttention, self).__init__(**kwargs)
+        self.W_k = nn.Linear(key_size, num_hiddens, bias=False)
+        self.W_q = nn.Linear(query_size, num_hiddens, bias=False)
+        self.w_v = nn.Linear(num_hiddens, 1, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, queries, keys, values, valid_lens):
+        queries, keys = self.W_q(queries), self.W_k(keys)
+        # 在维度扩展后，
+        # queries的形状：(batch_size，查询的个数，1，num_hidden)
+        # key的形状：(batch_size，1，“键－值”对的个数，num_hiddens)
+        # 使用广播方式进行求和
+        features = queries.unsqueeze(2) + keys.unsqueeze(1)
+        features = torch.tanh(features)
+        # self.w_v仅有一个输出，因此从形状中移除最后那个维度。
+        # scores的形状：(batch_size，查询的个数，“键-值”对的个数)
+        scores = self.w_v(features).squeeze(-1)
+        self.attention_weights = masked_softmax(scores, valid_lens)
+        # values的形状：(batch_size，“键－值”对的个数，值的维度)
+        return torch.bmm(self.dropout(self.attention_weights), values)
+
+class DotProductAttention(nn.Module):
+    """缩放点积注意力
+
+    Defined in :numref:`subsec_additive-attention`"""
+    def __init__(self, dropout, **kwargs):
+        super(DotProductAttention, self).__init__(**kwargs)
+        self.dropout = nn.Dropout(dropout)
+
+    # queries的形状：(batch_size，查询的个数，d)
+    # keys的形状：(batch_size，“键－值”对的个数，d)
+    # values的形状：(batch_size，“键－值”对的个数，值的维度)
+    # valid_lens的形状:(batch_size，)或者(batch_size，查询的个数)
+    def forward(self, queries, keys, values, valid_lens=None):
+        d = queries.shape[-1]
+        # 设置transpose_b=True为了交换keys的最后两个维度
+        scores = torch.bmm(queries, keys.transpose(1,2)) / math.sqrt(d)
+        self.attention_weights = masked_softmax(scores, valid_lens)
+        return torch.bmm(self.dropout(self.attention_weights), values)
+
+class AttentionDecoder(Decoder):
+    """带有注意力机制解码器的基本接口
+
+    Defined in :numref:`sec_seq2seq_attention`"""
+    def __init__(self, **kwargs):
+        super(AttentionDecoder, self).__init__(**kwargs)
+
+    @property
+    def attention_weights(self):
+        raise NotImplementedError
+
+class MultiHeadAttention(nn.Module):
+    """多头注意力
+
+    Defined in :numref:`sec_multihead-attention`"""
+    def __init__(self, key_size, query_size, value_size, num_hiddens,
+                 num_heads, dropout, bias=False, **kwargs):
+        super(MultiHeadAttention, self).__init__(**kwargs)
+        self.num_heads = num_heads
+        self.attention = DotProductAttention(dropout)
+        self.W_q = nn.Linear(query_size, num_hiddens, bias=bias)
+        self.W_k = nn.Linear(key_size, num_hiddens, bias=bias)
+        self.W_v = nn.Linear(value_size, num_hiddens, bias=bias)
+        self.W_o = nn.Linear(num_hiddens, num_hiddens, bias=bias)
+
+    def forward(self, queries, keys, values, valid_lens):
+        # queries，keys，values的形状:
+        # (batch_size，查询或者“键－值”对的个数，num_hiddens)
+        # valid_lens　的形状:
+        # (batch_size，)或(batch_size，查询的个数)
+        # 经过变换后，输出的queries，keys，values　的形状:
+        # (batch_size*num_heads，查询或者“键－值”对的个数，
+        # num_hiddens/num_heads)
+        queries = transpose_qkv(self.W_q(queries), self.num_heads)
+        keys = transpose_qkv(self.W_k(keys), self.num_heads)
+        values = transpose_qkv(self.W_v(values), self.num_heads)
+
+        if valid_lens is not None:
+            # 在轴0，将第一项（标量或者矢量）复制num_heads次，
+            # 然后如此复制第二项，然后诸如此类。
+            valid_lens = torch.repeat_interleave(
+                valid_lens, repeats=self.num_heads, dim=0)
+
+        # output的形状:(batch_size*num_heads，查询的个数，
+        # num_hiddens/num_heads)
+        output = self.attention(queries, keys, values, valid_lens)
+
+        # output_concat的形状:(batch_size，查询的个数，num_hiddens)
+        output_concat = transpose_output(output, self.num_heads)
+        return self.W_o(output_concat)
+
+def transpose_qkv(X, num_heads):
+    """为了多注意力头的并行计算而变换形状
+
+    Defined in :numref:`sec_multihead-attention`"""
+    # 输入X的形状:(batch_size，查询或者“键－值”对的个数，num_hiddens)
+    # 输出X的形状:(batch_size，查询或者“键－值”对的个数，num_heads，
+    # num_hiddens/num_heads)
+    X = X.reshape(X.shape[0], X.shape[1], num_heads, -1)
+
+    # 输出X的形状:(batch_size，num_heads，查询或者“键－值”对的个数,
+    # num_hiddens/num_heads)
+    X = X.permute(0, 2, 1, 3)
+
+    # 最终输出的形状:(batch_size*num_heads,查询或者“键－值”对的个数,
+    # num_hiddens/num_heads)
+    return X.reshape(-1, X.shape[2], X.shape[3])
+
+
+def transpose_output(X, num_heads):
+    """逆转transpose_qkv函数的操作
+
+    Defined in :numref:`sec_multihead-attention`"""
+    X = X.reshape(-1, num_heads, X.shape[1], X.shape[2])
+    X = X.permute(0, 2, 1, 3)
+    return X.reshape(X.shape[0], X.shape[1], -1)
+
+class PositionalEncoding(nn.Module):
+    """位置编码
+
+    Defined in :numref:`sec_self-attention-and-positional-encoding`"""
+    def __init__(self, num_hiddens, dropout, max_len=1000):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(dropout)
+        # 创建一个足够长的P
+        self.P = torch.zeros((1, max_len, num_hiddens))
+        X = torch.arange(max_len, dtype=torch.float32).reshape(
+            -1, 1) / torch.pow(10000, torch.arange(
+            0, num_hiddens, 2, dtype=torch.float32) / num_hiddens)
+        self.P[:, :, 0::2] = torch.sin(X)
+        self.P[:, :, 1::2] = torch.cos(X)
+
+    def forward(self, X):
+        X = X + self.P[:, :X.shape[1], :].to(X.device)
+        return self.dropout(X)
+
+class PositionWiseFFN(nn.Module):
+    """基于位置的前馈网络
+
+    Defined in :numref:`sec_transformer`"""
+    def __init__(self, ffn_num_input, ffn_num_hiddens, ffn_num_outputs,
+                 **kwargs):
+        super(PositionWiseFFN, self).__init__(**kwargs)
+        self.dense1 = nn.Linear(ffn_num_input, ffn_num_hiddens)
+        self.relu = nn.ReLU()
+        self.dense2 = nn.Linear(ffn_num_hiddens, ffn_num_outputs)
+
+    def forward(self, X):
+        return self.dense2(self.relu(self.dense1(X)))
+
+class AddNorm(nn.Module):
+    """残差连接后进行层规范化
+
+    Defined in :numref:`sec_transformer`"""
+    def __init__(self, normalized_shape, dropout, **kwargs):
+        super(AddNorm, self).__init__(**kwargs)
+        self.dropout = nn.Dropout(dropout)
+        self.ln = nn.LayerNorm(normalized_shape)
+
+    def forward(self, X, Y):
+        return self.ln(self.dropout(Y) + X)
+
+class EncoderBlock(nn.Module):
+    """Transformer编码器块
+
+    Defined in :numref:`sec_transformer`"""
+    def __init__(self, key_size, query_size, value_size, num_hiddens,
+                 norm_shape, ffn_num_input, ffn_num_hiddens, num_heads,
+                 dropout, use_bias=False, **kwargs):
+        super(EncoderBlock, self).__init__(**kwargs)
+        self.attention = MultiHeadAttention(
+            key_size, query_size, value_size, num_hiddens, num_heads, dropout,
+            use_bias)
+        self.addnorm1 = AddNorm(norm_shape, dropout)
+        self.ffn = PositionWiseFFN(
+            ffn_num_input, ffn_num_hiddens, num_hiddens)
+        self.addnorm2 = AddNorm(norm_shape, dropout)
+
+    def forward(self, X, valid_lens):
+        Y = self.addnorm1(X, self.attention(X, X, X, valid_lens))
+        return self.addnorm2(Y, self.ffn(Y))
+
+class TransformerEncoder(Encoder):
+    """Transformer编码器
+
+    Defined in :numref:`sec_transformer`"""
+    def __init__(self, vocab_size, key_size, query_size, value_size,
+                 num_hiddens, norm_shape, ffn_num_input, ffn_num_hiddens,
+                 num_heads, num_layers, dropout, use_bias=False, **kwargs):
+        super(TransformerEncoder, self).__init__(**kwargs)
+        self.num_hiddens = num_hiddens
+        self.embedding = nn.Embedding(vocab_size, num_hiddens)
+        self.pos_encoding = PositionalEncoding(num_hiddens, dropout)
+        self.blks = nn.Sequential()
+        for i in range(num_layers):
+            self.blks.add_module("block"+str(i),
+                EncoderBlock(key_size, query_size, value_size, num_hiddens,
+                             norm_shape, ffn_num_input, ffn_num_hiddens,
+                             num_heads, dropout, use_bias))
+
+    def forward(self, X, valid_lens, *args):
+        # 因为位置编码值在-1和1之间，
+        # 因此嵌入值乘以嵌入维度的平方根进行缩放，
+        # 然后再与位置编码相加。
+        X = self.pos_encoding(self.embedding(X) * math.sqrt(self.num_hiddens))
+        self.attention_weights = [None] * len(self.blks)
+        for i, blk in enumerate(self.blks):
+            X = blk(X, valid_lens)
+            self.attention_weights[
+                i] = blk.attention.attention.attention_weights
+        return X
+
+def annotate(text, xy, xytext):
+    plt.gca().annotate(text, xy=xy, xytext=xytext,
+                           arrowprops=dict(arrowstyle='->'))

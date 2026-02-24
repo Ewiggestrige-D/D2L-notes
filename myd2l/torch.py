@@ -1518,7 +1518,7 @@ def masked_softmax(X, valid_lens):
         # X.reshape(-1, shape[- 1])目的是 将多维张量展平为“批量 × 特征”格式，以便应用序列掩码（sequence 
         # ，shape[-1]保留最后一维的维度
         # -1是一个占位符，表示将前面所有的维度都flatten，即将前面所有的维度相乘
-        X = d2l.sequence_mask(
+        X = sequence_mask(
             X.reshape(-1, shape[- 1]),
             valid_lens,
             value=-1e6) 

@@ -1549,8 +1549,8 @@ class AdditiveAttention(nn.Module):
         # tanh之后feature的形状：(batch_size，num_q，num_kv，1)
          = torch.tanh(features)
         # self.w_v仅有一个输出，因此从形状中移除最后那个维度。
-        # scores的形状：atch_size，num_q，num_kv)
-        scores = self.w_v(features)(b.squeeze(-1)
+        # scores的形状：(batch_size，num_q，num_kv)
+        scores = self.w_v(features).squeeze(-1)
         self.attention_weights = masked_softmax(scores, valid_lens)
         # values的形状：(batch_size，num_kv,value_size)
         # output的形状：(batch_size，num_q,value_size)

@@ -1535,7 +1535,7 @@ class AdditiveAttention(nn.Module):
         # (batch_size, num_q, query_size)->(batch_size, num_q, num_hidden)
         self.W_q = nn.Linear(query_size, num_hiddens, bias=False)
         # hidden -> score
-        sfeatureself.w_v = nn.Linear(num_hiddens, 1, bias=False)
+        self.w_v = nn.Linear(num_hiddens, 1, bias=False)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, queries, keys, values, valid_lens):
@@ -1547,7 +1547,7 @@ class AdditiveAttention(nn.Module):
         # feature的形状：(batch_size，num_q，num_kv，num_hiddens)
         features = queries.unsqueeze(2) + keys.unsqueeze(1)
         # tanh之后feature的形状：(batch_size，num_q，num_kv，1)
-         = torch.tanh(features)
+        features = torch.tanh(features)
         # self.w_v仅有一个输出，因此从形状中移除最后那个维度。
         # scores的形状：(batch_size，num_q，num_kv)
         scores = self.w_v(features).squeeze(-1)

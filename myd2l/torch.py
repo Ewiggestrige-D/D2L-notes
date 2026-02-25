@@ -1678,8 +1678,10 @@ class PositionWiseFFN(nn.Module):
     def __init__(self, ffn_num_input, ffn_num_hiddens, ffn_num_outputs,
                  **kwargs):
         super(PositionWiseFFN, self).__init__(**kwargs)
+        # （Batch_size,time_step,ffn_num_input）->（Batch_size,time_step,ffn_num_hiddens）
         self.dense1 = nn.Linear(ffn_num_input, ffn_num_hiddens)
         self.relu = nn.ReLU()
+        # （Batch_size,time_step,ffn_num_hiddens）->（Batch_size,time_step,ffn_num_output）
         self.dense2 = nn.Linear(ffn_num_hiddens, ffn_num_outputs)
 
     def forward(self, X):
@@ -1692,10 +1694,10 @@ class AddNorm(nn.Module):
     def __init__(self, normalized_shape, dropout, **kwargs):
         super(AddNorm, self).__init__(**kwargs)
         self.dropout = nn.Dropout(dropout)
-        self.ln = nn.LayerNorm(normalized_shape)
+        self.layer_norm = nn.LayerNorm(normalized_shape)
 
     def forward(self, X, Y):
-        return self.ln(self.dropout(Y) + X)
+        return self.layer_norm(self.dropout(Y) + X)
 
 class EncoderBlock(nn.Module):
     """Transformer编码器块
